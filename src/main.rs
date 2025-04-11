@@ -5,13 +5,117 @@ use std::ptr;
 use std::sync::mpsc;
 use std::sync::mpsc::Receiver;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use glfw::{Action, Context, Key};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 
 const VERTEX_SHADER_PATH: &str = "shaders/vertex.glsl";
 const FRAGMENT_SHADER_PATH: &str = "shaders/fragment.glsl";
+
+// Create vertex buffers with minimal unsafe scope
+fn create_vertex_buffers() -> (u32, u32) {
+    // Define vertex data outside the unsafe block
+    let vertices: [f32; 30] = [
+        // Positions (3) // Texture coords (2)
+        -1.0, 1.0, 0.0, 0.0, 1.0, // Top-left
+        -1.0, -1.0, 0.0, 0.0, 0.0, // Bottom-left
+        1.0, -1.0, 0.0, 1.0, 0.0, // Bottom-right
+        -1.0, 1.0, 0.0, 0.0, 1.0, // Top-left
+        1.0, -1.0, 0.0, 1.0, 0.0, // Bottom-right
+        1.0, 1.0, 0.0, 1.0, 1.0, // Top-right
+    ];
+
+    let mut vao = 0;
+    let mut vbo = 0;
+
+    // Create and configure buffers
+    unsafe {
+        // Create VAO and VBO
+        gl::GenVertexArrays(1, &mut vao);
+        gl::GenBuffers(1, &mut vbo);
+
+        // Bind VAO
+        gl::BindVertexArray(vao);
+
+        // Bind VBO and upload data
+        gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
+        gl::BufferData(
+            gl::ARRAY_BUFFER,
+            (vertices.len() * std::mem::size_of::<f32>()) as isize,
+            vertices.as_ptr() as *const _,
+            gl::STATIC_DRAW,
+        );
+
+        // Set vertex attribute pointers
+        // Position attribute
+        gl::VertexAttribPointer(
+            0,                                       // attribute index
+            3,                                       // size (vec3)
+            gl::FLOAT,                               // type
+            gl::FALSE,                               // normalized
+            (5 * std::mem::size_of::<f32>()) as i32, // stride (5 floats per vertex)
+            ptr::null(),                             // offset
+        );
+        gl::EnableVertexAttribArray(0);
+
+        // Texture coordinate attribute
+        gl::VertexAttribPointer(
+            1,                                            // attribute index
+            2,                                            // size (vec2)
+            gl::FLOAT,                                    // type
+            gl::FALSE,                                    // normalized
+            (5 * std::mem::size_of::<f32>()) as i32,      // stride (5 floats per vertex)
+            (3 * std::mem::size_of::<f32>()) as *const _, // offset (after 3 floats)
+        );
+        gl::EnableVertexAttribArray(1);
+
+        // Unbind
+        gl::BindBuffer(gl::ARRAY_BUFFER, 0);
+        gl::BindVertexArray(0);
+    }
+
+    (vao, vbo)
+}
+
+// Struct to hold time-related data
+struct TimeState {
+    start_time: SystemTime,
+    last_frame_time: SystemTime,
+    delta_time: f32,
+    total_time: f32,
+}
+
+impl TimeState {
+    fn new() -> Self {
+        let now = SystemTime::now();
+        Self {
+            start_time: now,
+            last_frame_time: now,
+            delta_time: 0.0,
+            total_time: 0.0,
+        }
+    }
+
+    fn update(&mut self) {
+        let now = SystemTime::now();
+
+        // Calculate delta time since last frame
+        self.delta_time = now
+            .duration_since(self.last_frame_time)
+            .unwrap_or(Duration::from_secs(0))
+            .as_secs_f32();
+
+        // Calculate total time since start
+        self.total_time = now
+            .duration_since(self.start_time)
+            .unwrap_or(Duration::from_secs(0))
+            .as_secs_f32();
+
+        // Update last frame time
+        self.last_frame_time = now;
+    }
+}
 
 // Struct to hold our application state
 struct State {
@@ -21,7 +125,7 @@ struct State {
     shader_program: u32,
     vao: u32,
     vbo: u32,
-    start_time: Instant,
+    time_state: TimeState,
     vertex_shader_path: String,
     fragment_shader_path: String,
 }
@@ -37,6 +141,9 @@ impl State {
             glfw::OpenGlProfileHint::Core,
         ));
 
+        // Enable double buffering
+        glfw.window_hint(glfw::WindowHint::DoubleBuffer(true));
+
         // Set this to true for macOS - important for compatibility
         #[cfg(target_os = "macos")]
         glfw.window_hint(glfw::WindowHint::OpenGlForwardCompat(true));
@@ -46,8 +153,9 @@ impl State {
             .create_window(width, height, title, glfw::WindowMode::Windowed)
             .expect("Failed to create GLFW window");
 
-        // Make the window's context current
+        // Enable VSync (use proper GLFW method)
         window.make_current();
+        glfw.set_swap_interval(glfw::SwapInterval::Sync(1));
         window.set_key_polling(true);
         window.set_framebuffer_size_polling(true);
 
@@ -55,66 +163,7 @@ impl State {
         gl::load_with(|s| window.get_proc_address(s) as *const _);
 
         // Create and bind VAO and VBO
-        let (vao, vbo) = unsafe {
-            let mut vao = 0;
-            let mut vbo = 0;
-
-            // Create and bind VAO
-            gl::GenVertexArrays(1, &mut vao);
-            gl::BindVertexArray(vao);
-
-            // Create and bind VBO
-            gl::GenBuffers(1, &mut vbo);
-            gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
-
-            // Define vertex data (full-screen quad)
-            let vertices: [f32; 30] = [
-                // Positions (3) // Texture coords (2)
-                -1.0, 1.0, 0.0, 0.0, 1.0, // Top-left
-                -1.0, -1.0, 0.0, 0.0, 0.0, // Bottom-left
-                1.0, -1.0, 0.0, 1.0, 0.0, // Bottom-right
-                -1.0, 1.0, 0.0, 0.0, 1.0, // Top-left
-                1.0, -1.0, 0.0, 1.0, 0.0, // Bottom-right
-                1.0, 1.0, 0.0, 1.0, 1.0, // Top-right
-            ];
-
-            // Upload vertex data
-            gl::BufferData(
-                gl::ARRAY_BUFFER,
-                (vertices.len() * std::mem::size_of::<f32>()) as isize,
-                vertices.as_ptr() as *const _,
-                gl::STATIC_DRAW,
-            );
-
-            // Set vertex attribute pointers
-            // Position attribute
-            gl::VertexAttribPointer(
-                0,                                       // attribute index
-                3,                                       // size (vec3)
-                gl::FLOAT,                               // type
-                gl::FALSE,                               // normalized
-                (5 * std::mem::size_of::<f32>()) as i32, // stride (5 floats per vertex)
-                ptr::null(),                             // offset
-            );
-            gl::EnableVertexAttribArray(0);
-
-            // Texture coordinate attribute
-            gl::VertexAttribPointer(
-                1,                                            // attribute index
-                2,                                            // size (vec2)
-                gl::FLOAT,                                    // type
-                gl::FALSE,                                    // normalized
-                (5 * std::mem::size_of::<f32>()) as i32,      // stride (5 floats per vertex)
-                (3 * std::mem::size_of::<f32>()) as *const _, // offset (after 3 floats)
-            );
-            gl::EnableVertexAttribArray(1);
-
-            // Unbind
-            gl::BindBuffer(gl::ARRAY_BUFFER, 0);
-            gl::BindVertexArray(0);
-
-            (vao, vbo)
-        };
+        let (vao, vbo) = create_vertex_buffers();
 
         // Create directories and default shaders if they don't exist
         create_default_shaders();
@@ -129,7 +178,7 @@ impl State {
             shader_program,
             vao,
             vbo,
-            start_time: Instant::now(),
+            time_state: TimeState::new(),
             vertex_shader_path: VERTEX_SHADER_PATH.to_string(),
             fragment_shader_path: FRAGMENT_SHADER_PATH.to_string(),
         }
@@ -154,6 +203,11 @@ impl State {
         }
     }
 
+    fn update(&mut self) {
+        // Update timing information
+        self.time_state.update();
+    }
+
     fn render(&mut self) {
         unsafe {
             // Clear the screen
@@ -163,13 +217,30 @@ impl State {
             // Use shader program
             gl::UseProgram(self.shader_program);
 
-            // Update uniforms
-            let elapsed = self.start_time.elapsed().as_secs_f32();
+            // Update time uniforms
             let time_loc = gl::GetUniformLocation(
                 self.shader_program,
                 CString::new("u_time").unwrap().as_ptr(),
             );
-            gl::Uniform1f(time_loc, elapsed);
+            gl::Uniform1f(time_loc, self.time_state.total_time);
+
+            // Add delta time uniform
+            let delta_loc = gl::GetUniformLocation(
+                self.shader_program,
+                CString::new("u_deltaTime").unwrap().as_ptr(),
+            );
+            gl::Uniform1f(delta_loc, self.time_state.delta_time);
+
+            // Add epoch timestamp uniform (useful for syncing with external time sources)
+            let epoch_loc = gl::GetUniformLocation(
+                self.shader_program,
+                CString::new("u_epochTime").unwrap().as_ptr(),
+            );
+            let epoch_secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::from_secs(0))
+                .as_secs_f32();
+            gl::Uniform1f(epoch_loc, epoch_secs);
 
             // Update resolution uniform
             let (width, height) = self.window.get_framebuffer_size();
@@ -377,8 +448,10 @@ void main() {
 in vec2 TexCoord;
 out vec4 FragColor;
 
-uniform float u_time;
-uniform vec2 u_resolution;
+uniform float u_time;       // Total elapsed time (seconds)
+uniform float u_deltaTime;  // Time since last frame (seconds)
+uniform float u_epochTime;  // System time (seconds since Unix epoch)
+uniform vec2 u_resolution;  // Window size (pixels)
 
 void main() {
     // Normalized coordinates (0 to 1)
@@ -441,6 +514,9 @@ fn main() {
         if receiver.try_recv().is_ok() {
             state.reload_shaders();
         }
+
+        // Update timing and animation state
+        state.update();
 
         // Render
         state.render();

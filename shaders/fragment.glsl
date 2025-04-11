@@ -2,8 +2,10 @@
 in vec2 TexCoord;
 out vec4 FragColor;
 
-uniform float u_time;
-uniform vec2 u_resolution;
+uniform float u_time;       // Total elapsed time (seconds)
+uniform float u_deltaTime;  // Time since last frame (seconds)
+uniform float u_epochTime;  // System time (seconds since Unix epoch)
+uniform vec2 u_resolution;  // Window size (pixels)
 
 void main() {
     const float TAU = 6.28318530718;
@@ -16,10 +18,14 @@ void main() {
     float dist = length(uv);
     float baseInnerRadius = 0.25;
     float baseOuterRadius = 0.4;
-    const int segments = 60;
+    const int segments = 81;
     float segmentSize = TAU / float(segments);
     float rawAngle = atan(uv.y, uv.x);
     float angle = mod(rawAngle + TAU, TAU);
+    
+    // Use the more stable time source for animation
+    // You could also use modulo on u_epochTime for a continuous animation
+    // that stays in sync with NTP
     float animatedAngle = angle + u_time * 0.1;
     float index = floor(animatedAngle / segmentSize);
     
