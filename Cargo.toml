@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+glfw = "0.51"
+gl = "0.14"
+notify = "5.1"
+image = "0.24"
+chrono = "0.4"
